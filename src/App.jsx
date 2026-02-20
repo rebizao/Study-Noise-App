@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { createNoiseProcessor } from "./audio/noiseGenerator";
 
 export default function App() {
@@ -12,8 +12,50 @@ export default function App() {
   });
 
   const audioRef = useRef(null);
+  const canvasRef = useRef(null);
+  const animationRef = useRef(null);
 
-  // 1. HELPER: Get active values based on type
+  // --- VISUALIZER DRAW LOOP ---
+  const startVisualizer = () => {
+    if (!audioRef.current || !canvasRef.current) return;
+    
+    const analyser = audioRef.current.analyser;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    const draw = () => {
+      animationRef.current = requestAnimationFrame(draw);
+      analyser.getByteTimeDomainData(dataArray);
+
+      // Clean Canvas
+      ctx.fillStyle = "#f9f9f9"; 
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw Wave
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = noiseType === "custom" ? "#007AFF" : "#444";
+      ctx.beginPath();
+
+      const sliceWidth = canvas.width / bufferLength;
+      let x = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        const v = dataArray[i] / 128.0;
+        const y = (v * canvas.height) / 2;
+
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+        x += sliceWidth;
+      }
+
+      ctx.lineTo(canvas.width, canvas.height / 2);
+      ctx.stroke();
+    };
+    draw();
+  };
+
   const getActiveParams = (type) => {
     const presets = {
       white: { gain: 0.12, hp: 350, lp: 1100, mod: 80 },
@@ -26,20 +68,17 @@ export default function App() {
 
   const active = getActiveParams(noiseType);
 
-  // 2. AUDIO LOGIC: Update the hardware nodes
   function applyNoiseTuning(a, type, settings) {
     if (!a) return;
     const t = a.ctx.currentTime;
-    const transition = 0.2;
     const params = settings || getActiveParams(type);
-
-    a.gain.gain.setTargetAtTime(params.gain, t, transition);
-    a.highpass.frequency.setTargetAtTime(params.hp, t, transition);
-    a.lowpass.frequency.setTargetAtTime(params.lp, t, transition);
-    a.lfoGain.gain.setTargetAtTime(params.mod, t, transition);
+    
+    a.gain.gain.setTargetAtTime(params.gain, t, 0.2);
+    a.highpass.frequency.setTargetAtTime(params.hp, t, 0.2);
+    a.lowpass.frequency.setTargetAtTime(params.lp, t, 0.2);
+    a.lfoGain.gain.setTargetAtTime(params.mod, t, 0.2);
   }
 
-  // 3. HANDLER: Slider movement
   const handleParamChange = (key, val) => {
     const newSettings = { ...customSettings, [key]: parseFloat(val) };
     setCustomSettings(newSettings);
@@ -48,66 +87,41 @@ export default function App() {
     }
   };
 
-  // 4. INITIALIZE: Create the Web Audio graph
   async function initAudio() {
     if (audioRef.current) return audioRef.current;
 
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioCtx();
-
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const gain = ctx.createGain();
-    gain.gain.value = 0; 
+    gain.gain.value = 0;
 
     const noise = createNoiseProcessor(ctx);
-
     const highpass = ctx.createBiquadFilter();
     highpass.type = "highpass";
-
-    const notch = ctx.createBiquadFilter();
-    notch.type = "peaking";
-    notch.frequency.value = 1200;
-    notch.gain.value = -6;
-
     const lowpass = ctx.createBiquadFilter();
     lowpass.type = "lowpass";
 
-    const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -30;
-    comp.ratio.value = 12;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
 
     const lfo = ctx.createOscillator();
-    lfo.type = "sine";
-    lfo.frequency.value = 0.03;
     const lfoGain = ctx.createGain();
     lfo.connect(lfoGain);
     lfoGain.connect(lowpass.frequency);
     lfo.start();
 
-    const ampLfo = ctx.createOscillator();
-    ampLfo.type = "sine";
-    ampLfo.frequency.value = 0.02;
-    const ampLfoGain = ctx.createGain();
-    ampLfoGain.gain.value = 0.05;
-    ampLfo.connect(ampLfoGain);
-    ampLfoGain.connect(gain.gain);
-    ampLfo.start();
-
     noise.node.connect(highpass);
-    highpass.connect(notch);
-    notch.connect(lowpass);
-    lowpass.connect(comp);
-    comp.connect(gain);
-    gain.connect(ctx.destination);
+    highpass.connect(lowpass);
+    lowpass.connect(gain);
+    gain.connect(analyser);
+    analyser.connect(ctx.destination);
 
-    audioRef.current = { ctx, gain, noise, highpass, notch, lowpass, lfoGain };
-    
-    // Set initial sound state
+    audioRef.current = { ctx, gain, noise, highpass, lowpass, lfoGain, analyser };
     applyNoiseTuning(audioRef.current, noiseType);
     
+    startVisualizer();
     return audioRef.current;
   }
 
-  // 5. HANDLER: Play/Pause
   async function togglePlay() {
     const a = await initAudio();
     if (!playing) {
@@ -119,16 +133,10 @@ export default function App() {
     }
   }
 
-  // 6. HANDLER: Change Noise Type
   async function changeNoise(type) {
     const a = await initAudio();
-    const now = a.ctx.currentTime;
-
-    // Fade out
-    a.gain.gain.setTargetAtTime(0, now, 0.05);
-
+    a.gain.gain.setTargetAtTime(0, a.ctx.currentTime, 0.05);
     setTimeout(() => {
-      // Custom mode uses the white noise generator as a base
       a.noise.setType(type === 'custom' ? 'white' : type);
       applyNoiseTuning(a, type);
       setNoiseType(type);
@@ -136,41 +144,70 @@ export default function App() {
   }
 
   return (
-    <div style={{ padding: 30, fontFamily: "system-ui", maxWidth: 450, color: "#333" }}>
-      <h2 style={{ margin: 0 }}>Zen Engine</h2>
-      <p style={{ fontSize: 13, color: "#666", marginBottom: 20 }}>Procedural Audio Focus Tool</p>
+    <div style={{ padding: 30, fontFamily: "system-ui", maxWidth: 450, margin: "auto" }}>
+      <header style={{ marginBottom: 20 }}>
+        <h2 style={{ margin: 0 }}>Zen Engine</h2>
+        <p style={{ fontSize: 13, color: "#666" }}>Live Procedural Soundscape</p>
+      </header>
 
-      <button onClick={togglePlay} style={{ width: "100%", padding: "12px", cursor: "pointer" }}>
-        {playing ? "PAUSE" : "PLAY"}
+      <canvas 
+        ref={canvasRef} 
+        width="400" 
+        height="120" 
+        style={{ 
+          width: "100%", background: "#f9f9f9", borderRadius: 12, marginBottom: 20,
+          border: "1px solid #eee" 
+        }} 
+      />
+
+      <button 
+        onClick={togglePlay} 
+        style={{ 
+          width: "100%", padding: 14, cursor: "pointer", fontWeight: "bold",
+          borderRadius: 8, border: "1px solid #ccc", background: playing ? "#fff" : "#222",
+          color: playing ? "#222" : "#fff"
+        }}
+      >
+        {playing ? "STOP ENGINE" : "START ENGINE"}
       </button>
 
-      <div style={{ marginTop: 20 }}>
-        <select value={noiseType} onChange={(e) => changeNoise(e.target.value)} style={{ width: "100%", padding: "10px" }}>
-          <option value="white">White Noise</option>
-          <option value="pink">Pink Noise</option>
-          <option value="brown">Brown Noise</option>
-          <option value="custom">🛠️ Custom Mode</option>
+      <div style={{ marginTop: 25 }}>
+        <select 
+          value={noiseType} 
+          onChange={(e) => changeNoise(e.target.value)} 
+          style={{ width: "100%", padding: 12, borderRadius: 8, fontSize: 14 }}
+        >
+          <option value="white">White Noise (Air)</option>
+          <option value="pink">Pink Noise (Rain)</option>
+          <option value="brown">Brown Noise (Ocean)</option>
+          <option value="custom">🛠️ Custom Lab</option>
         </select>
       </div>
 
-      <div style={{ marginTop: 20, padding: 20, background: "#f9f9f9", borderRadius: 12 }}>
+      <div style={{ marginTop: 20, padding: 20, background: "#fcfcfc", borderRadius: 12, border: "1px solid #f0f0f0" }}>
         {[
           { label: "Muffle (Low-pass)", key: "lp", unit: "Hz", min: 200, max: 3000 },
           { label: "Thinness (High-pass)", key: "hp", unit: "Hz", min: 20, max: 1200 },
           { label: "Ocean Sweep (Mod)", key: "mod", unit: "", min: 0, max: 800 },
           { label: "Volume", key: "gain", unit: "", min: 0, max: 0.5, step: 0.01 }
         ].map((p) => (
-          <div key={p.key} style={{ marginBottom: 15 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-              <span>{p.label}</span>
-              <span>{active[p.key]}{p.unit}</span>
+          <div key={p.key} style={{ marginBottom: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+              <span style={{ color: "#666" }}>{p.label}</span>
+              <span style={{ fontWeight: "bold", color: noiseType === "custom" ? "#007AFF" : "#333" }}>
+                {active[p.key]}{p.unit}
+              </span>
             </div>
             <input 
               type="range" min={p.min} max={p.max} step={p.step || 10}
               value={active[p.key]} 
               disabled={noiseType !== "custom"}
               onChange={(e) => handleParamChange(p.key, e.target.value)}
-              style={{ width: "100%" }}
+              style={{ 
+                width: "100%", 
+                opacity: noiseType === "custom" ? 1 : 0.5,
+                cursor: noiseType === "custom" ? "pointer" : "default" 
+              }}
             />
           </div>
         ))}

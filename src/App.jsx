@@ -4,6 +4,7 @@ import { createNoiseProcessor } from "./audio/noiseGenerator";
 export default function App() {
   const [playing, setPlaying] = useState(false);
   const [noiseType, setNoiseType] = useState("white");
+  const [rainActive, setRainActive] = useState(false); // New state for rain
   const [customSettings, setCustomSettings] = useState({
     gain: 0.15,
     hp: 300,
@@ -29,11 +30,9 @@ export default function App() {
       animationRef.current = requestAnimationFrame(draw);
       analyser.getByteTimeDomainData(dataArray);
 
-      // Clean Canvas
       ctx.fillStyle = "#f9f9f9"; 
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       
-      // Draw Wave
       ctx.lineWidth = 2;
       ctx.strokeStyle = noiseType === "custom" ? "#007AFF" : "#444";
       ctx.beginPath();
@@ -87,35 +86,103 @@ export default function App() {
     }
   };
 
+  // --- NEW RAIN TOGGLE HANDLER ---
+  const toggleRain = () => {
+    const newState = !rainActive;
+    setRainActive(newState);
+    if (audioRef.current) {
+      const t = audioRef.current.ctx.currentTime;
+      // Fade rain in/out smoothly to avoid audio pops
+      audioRef.current.rainGain.gain.setTargetAtTime(newState ? 0.08 : 0, t, 0.5);
+    }
+  };
+
   async function initAudio() {
     if (audioRef.current) return audioRef.current;
 
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
-
-    const noise = createNoiseProcessor(ctx);
+    
+    // -------- NOISE SOURCES --------
+    const mainNoise = createNoiseProcessor(ctx);
+    const rainNoise = createNoiseProcessor(ctx); // Separate source for rain
+    
+    // -------- FILTERS & GAIN --------
     const highpass = ctx.createBiquadFilter();
     highpass.type = "highpass";
     const lowpass = ctx.createBiquadFilter();
     lowpass.type = "lowpass";
+    
+    const rainFilter = ctx.createBiquadFilter();
+    rainFilter.type = "highpass";
+    rainFilter.frequency.value = 5000; 
+    
+    const rainGain = ctx.createGain();
+    // Use the current state to set initial rain volume
+    rainGain.gain.value = rainActive ? 0.08 : 0;
 
+    const masterGain = ctx.createGain();
+    masterGain.gain.value = 0; // Starts at 0, ramps up in applyNoiseTuning
+    
+    const panner = ctx.createStereoPanner();
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
 
-    const lfo = ctx.createOscillator();
-    const lfoGain = ctx.createGain();
-    lfo.connect(lfoGain);
-    lfoGain.connect(lowpass.frequency);
-    lfo.start();
+    // -------- MOVEMENT (LFOs) --------
+    const lfoL = ctx.createOscillator();
+    lfoL.frequency.value = 0.03; 
+    const lfoGainL = ctx.createGain();
+    const lfoR = ctx.createOscillator();
+    lfoR.frequency.value = 0.037; 
+    const lfoGainR = ctx.createGain();
 
-    noise.node.connect(highpass);
+    const panLfo = ctx.createOscillator();
+    panLfo.frequency.value = 0.02; 
+    const panGain = ctx.createGain();
+    panGain.gain.value = 0.3;
+
+    // Connect LFOs
+    lfoL.connect(lfoGainL);
+    lfoR.connect(lfoGainR);
+    lfoGainL.connect(lowpass.frequency);
+    lfoGainR.connect(lowpass.frequency);
+    panLfo.connect(panGain);
+    panGain.connect(panner.pan);
+
+    // -------- THE GRAPH CONNECTIONS --------
+    // Main Noise Path
+    mainNoise.node.connect(highpass);
     highpass.connect(lowpass);
-    lowpass.connect(gain);
-    gain.connect(analyser);
+    lowpass.connect(panner); 
+
+    // Rain Path
+    rainNoise.node.connect(rainFilter);
+    rainFilter.connect(rainGain);
+    rainGain.connect(panner); 
+
+    // Output Path
+    panner.connect(masterGain);
+    masterGain.connect(analyser);
     analyser.connect(ctx.destination);
 
-    audioRef.current = { ctx, gain, noise, highpass, lowpass, lfoGain, analyser };
+    // Start Oscillators
+    lfoL.start();
+    lfoR.start();
+    panLfo.start();
+
+    // Store in Ref
+    audioRef.current = { 
+      ctx, 
+      gain: masterGain, 
+      noise: mainNoise, 
+      rainGain, 
+      highpass, 
+      lowpass, 
+      lfoGain: lfoGainL, 
+      analyser, 
+      panner 
+    };
+    
+    // Critical: Apply the initial settings to the nodes
     applyNoiseTuning(audioRef.current, noiseType);
     
     startVisualizer();
@@ -154,22 +221,33 @@ export default function App() {
         ref={canvasRef} 
         width="400" 
         height="120" 
-        style={{ 
-          width: "100%", background: "#f9f9f9", borderRadius: 12, marginBottom: 20,
-          border: "1px solid #eee" 
-        }} 
+        style={{ width: "100%", background: "#f9f9f9", borderRadius: 12, marginBottom: 20, border: "1px solid #eee" }} 
       />
 
-      <button 
-        onClick={togglePlay} 
-        style={{ 
-          width: "100%", padding: 14, cursor: "pointer", fontWeight: "bold",
-          borderRadius: 8, border: "1px solid #ccc", background: playing ? "#fff" : "#222",
-          color: playing ? "#222" : "#fff"
-        }}
-      >
-        {playing ? "STOP ENGINE" : "START ENGINE"}
-      </button>
+      <div style={{ display: "flex", gap: "10px", marginBottom: "20px" }}>
+        <button 
+          onClick={togglePlay} 
+          style={{ 
+            flex: 2, padding: 14, cursor: "pointer", fontWeight: "bold",
+            borderRadius: 8, border: "1px solid #ccc", background: playing ? "#fff" : "#222",
+            color: playing ? "#222" : "#fff"
+          }}
+        >
+          {playing ? "STOP ENGINE" : "START ENGINE"}
+        </button>
+
+        <button 
+          onClick={toggleRain} 
+          style={{ 
+            flex: 1, padding: 14, cursor: "pointer", fontWeight: "bold",
+            borderRadius: 8, border: "1px solid #ccc", 
+            background: rainActive ? "#007AFF" : "#fff",
+            color: rainActive ? "#fff" : "#222"
+          }}
+        >
+          {rainActive ? "🌧️ RAIN" : "☁️ RAIN"}
+        </button>
+      </div>
 
       <div style={{ marginTop: 25 }}>
         <select 
@@ -203,11 +281,7 @@ export default function App() {
               value={active[p.key]} 
               disabled={noiseType !== "custom"}
               onChange={(e) => handleParamChange(p.key, e.target.value)}
-              style={{ 
-                width: "100%", 
-                opacity: noiseType === "custom" ? 1 : 0.5,
-                cursor: noiseType === "custom" ? "pointer" : "default" 
-              }}
+              style={{ width: "100%", opacity: noiseType === "custom" ? 1 : 0.5 }}
             />
           </div>
         ))}

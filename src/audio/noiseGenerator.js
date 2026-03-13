@@ -14,8 +14,7 @@ export function createNoiseProcessor(ctx) {
     for (let i = 0; i < out.length; i++) {
       const white = Math.random() * 2 - 1;
 
-      if (noiseType === "white") {
-        // White is naturally 1.0 amplitude. 
+      if (noiseType === "white") {        // White is naturally 1.0 amplitude. 
         // We cap it at 0.2 here so it doesn't hurt.
         out[i] = white * 0.2; 
       } 
